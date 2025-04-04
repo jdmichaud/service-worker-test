@@ -1,41 +1,87 @@
+function ThreadRequester(sender, receiver=undefined) {
+  if (receiver === undefined) {
+    receiver = sender;
+  }
+
+  let counter = 0;
+  let inflight = {};
+
+  receiver.addEventListener('message', event => {
+    const message = event.data;
+    if (message.__id === undefined) {
+      console.warn('received a message with no id');
+    }
+    inflight[message.__id].resolve(message);
+    delete inflight[message.__id];
+  });
+
+  receiver.addEventListener('messageerror', event => {
+    const message = event.data;
+    if (message.__id === undefined) {
+      console.warn('received a message error with no id');
+    }
+    inflight[message.__id].reject(message);
+    delete inflight[message.__id];
+  });
+
+  return {
+    send: (message, transfer) => {
+      counter += 1;
+      const promiseWithResolvers = Promise.withResolvers();
+      inflight[counter] = promiseWithResolvers;
+      if (message === undefined || message === null) {
+        message = {};
+      }
+      message.__id = counter;
+      sender.postMessage(message, transfer);
+      return inflight[counter].promise;
+    },
+  };
+}
+
 async function main() {
   console.log('ready');
 
-  window.SharedArrayBuffer
-    ? console.log('SharedArrayBuffer available')
-    : console.log('SharedArrayBuffer not available');
+  if (!('serviceWorker' in navigator)) {
+    console.log('Service Worker is not supported in this browser.');
+    return;
+  }
+  const serviceWorkerContainer = navigator.serviceWorker;
 
-  const { promise: serviceWorkerPromise, resolve } = Promise.withResolvers();
-  navigator.serviceWorker.ready.then(registration => {
-    console.log('navigator.serviceWorker.ready');
-    resolve(registration.active);
+  const { promise: serviceWorkerPromise, resolve: resolveServiceWorker } = Promise.withResolvers();
+  serviceWorkerContainer.ready.then(registration => {
+    console.log('serviceWorkerContainer.ready');
+    resolveServiceWorker(registration.active);
   });
 
-  if ('serviceWorker' in navigator) {
-    // Register the Service Worker when the page loads
-    navigator.serviceWorker.register('/service-worker.js')
-      .then((registration) => {
-        console.log('Service Worker registered with registration: ', registration);
-      })
-      .catch((error) => {
-        console.log('Service Worker registration failed: ', error);
-      });
-  } else {
-    console.log('Service Worker is not supported in this browser.');
-  }
+  const { promise: registrationPromise, resolve: resolveRegistration } = Promise.withResolvers();
+  // Register the Service Worker when the page loads
+  serviceWorkerContainer.register('/service-worker.js')
+    .then(async (registration) => {
+      console.log('Service Worker registered with registration: ', registration);
+      await registration.update();
+      resolveRegistration(registration);
+    })
+    .catch((error) => {
+      console.log('Service Worker registration failed: ', error);
+    });
 
-  const serviceWorker = await serviceWorkerPromise;
+  const [serviceWorker, _] = await Promise.all([serviceWorkerPromise, registrationPromise]);
+  const requester = new ThreadRequester(serviceWorker, serviceWorkerContainer);
+
   {
     console.log('posting big ArrayBuffer...');
     const data = new ArrayBuffer(1024 * 1024 * 1024 * 1);
     const start = Date.now();
-    await serviceWorker.postMessage({ start, data });
+    await requester.send({ start, data }, [data]);
   }
   if (window.SharedArrayBuffer) {
     console.log('posting big SharedArrayBuffer...');
     const data = new SharedArrayBuffer(1024 * 1024 * 1024 * 1);
     const start = Date.now();
-    await serviceWorker.postMessage({ start, data });
+    console.log('before post');
+    await requester.send({ start, data });
+    console.log('after post');
   }
 }
 
